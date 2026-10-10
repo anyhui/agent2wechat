@@ -1,8 +1,18 @@
 # examples — 与 Muse hooks 的参考对接
 
-桥接本体只提供文件队列（见上级 README 的「文件队列接口」）。这两个脚本是把队列接到 Muse hook 机制上的参考实现，其他智能体框架可按同样的队列契约自行对接。
+桥接本体只提供文件队列（见上级 README 的「文件队列接口」）。这一目录给出把队列接到 Muse hook 机制上的完整参考实现，其他智能体框架可按同样的队列契约自行对接。
 
-- `wechat-inbox.sh`：轮询 `inbox/` 和 `alerts/`，有新消息时唤醒智能体处理。唤醒指令需约定：读完整入站 JSON、回复必须纯文本、把回复（含可选 attachments）写到 `outbox/`、处理完把入站文件移入 `processed/`；凭证过期告警（-14）要醒目上报。
-- `muse2wechat-watchdog.sh`：轮询 systemd 服务状态，发现服务丢失就重跑 `install-service.sh` 拉起，并唤醒上报，实现无人值守自愈。
+## 需要创建的两个 hook
 
-两个脚本里的队列根目录都可用环境变量 `WECHAT_BRIDGE_HOME` 覆盖，默认 `$HOME/workspace/muse2wechat`。
+在 Muse 里各建一个 hook，脚本用本目录的 .sh，指令（prompt）用本目录对应的模板：
+
+| hook | 脚本 | 轮询间隔 | 指令模板 | 作用 |
+| --- | --- | --- | --- | --- |
+| 消息处理 | `wechat-inbox.sh` | 15 秒 | `hook-prompt-inbox.md` | 轮询 inbox/ 与 alerts/，有新消息就唤醒智能体处理并回写 outbox/ |
+| 服务巡检 | `muse2wechat-watchdog.sh` | 120 秒 | `hook-prompt-watchdog.md` | 轮询 systemd 服务状态，发现丢失就重跑 install-service.sh 拉起并唤醒上报 |
+
+## 约定
+
+- 队列根目录可用环境变量 `WECHAT_BRIDGE_HOME` 覆盖，默认 `$HOME/workspace/muse2wechat`。
+- 指令模板里的 `<BRIDGE_HOME>` 要替换成本项目目录的实际路径；带方括号的说明是给部署者看的，改完删掉。
+- 回复纪律（纯文本、不带 Markdown）、outbox 写法、过期告警上报，都写在指令模板里，部署时按模板原文使用即可；只有「执行摘要写多细」这类偏好项需要部署者自己定。
