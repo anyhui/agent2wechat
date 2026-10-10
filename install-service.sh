@@ -6,7 +6,7 @@
 set -euo pipefail
 
 UNIT=/etc/systemd/system/muse2wechat.service
-WORKDIR="$HOME/workspace/muse2wechat"
+WORKDIR="$(cd "$(dirname "$0")" && pwd)"
 ENVFILE="$WORKDIR/proxy-env.sh"
 
 # Unattended reinstalls (watchdog) have no interactive shell env: reuse the
@@ -18,7 +18,7 @@ fi
 
 {
   echo "[Unit]"
-  echo "Description=Muse WeChat Bridge (iLink)"
+  echo "Description=muse2wechat bridge (iLink)"
   echo "After=network-online.target"
   echo "Wants=network-online.target"
   echo ""

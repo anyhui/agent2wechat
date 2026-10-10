@@ -1,7 +1,7 @@
 {
   "name": "muse2wechat",
   "version": "1.0.0",
-  "description": "Muse WeChat Bridge via Tencent iLink Bot API",
+  "description": "WeChat bridge for AI agents via Tencent iLink Bot API",
   "type": "module",
   "dependencies": {
     "qrcode": "^1.5.4"
