@@ -5,11 +5,15 @@ node_modules/
 !.env.example
 
 # Credentials and runtime state
+bridge.config.json
 state.json
 chat-log.md
 status.json
 proxy-env.sh
 *.service
+/accounts/*
+/statuses/*
+/chat-logs/*
 
 # Private messages, media, login data and logs
 /media-in/*

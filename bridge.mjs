@@ -22,6 +22,9 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
+const CONFIG_PATH = path.join(DIR, "bridge.config.json");
+const ACCOUNTS_DIR = path.join(DIR, "accounts");
+const STATUSES_DIR = path.join(DIR, "statuses");
 const STATE_PATH = path.join(DIR, "state.json");
 const STATUS_PATH = path.join(DIR, "status.json");
 const INBOX = path.join(DIR, "inbox");
@@ -41,8 +44,84 @@ const APP_CLIENT_VERSION = String((2 << 16) | (4 << 8) | 8); // 0x00MMNNPP for 2
 const UIN = Buffer.from(String(crypto.randomInt(0, 0xffffffff))).toString("base64");
 const TEXT_CHUNK = 3500;
 
-for (const d of [INBOX, MEDIA_IN, OUTBOX, SENT, FAILED, ALERTS, LOGIN_DIR, path.dirname(LOG_PATH)]) {
+for (const d of [INBOX, MEDIA_IN, OUTBOX, SENT, FAILED, ALERTS, LOGIN_DIR, ACCOUNTS_DIR, STATUSES_DIR, path.dirname(LOG_PATH)]) {
   fs.mkdirSync(d, { recursive: true });
+}
+
+const BINDING_NAME_RE = /^[a-z0-9_-]{1,32}$/;
+
+function emptyState() {
+  return {
+    bot_token: "",
+    baseurl: DEFAULT_BASE,
+    ilink_bot_id: "",
+    owner_user_id: "",
+    get_updates_buf: "",
+    last_context_token: "",
+    last_context_at: 0,
+    seen_ids: [],
+    auth_status: "not_logged_in",
+  };
+}
+
+function resolveStatePath(relPath, bindingName) {
+  const fallback = bindingName === "default" ? "state.json" : path.join("accounts", bindingName, "state.json");
+  const resolved = path.resolve(DIR, relPath || fallback);
+  if (resolved !== DIR && !resolved.startsWith(DIR + path.sep)) {
+    throw new Error(`state_file for binding ${bindingName} escapes the bridge directory`);
+  }
+  return resolved;
+}
+
+function normalizeBinding(raw, index = 0) {
+  const name = String(raw?.name || "").trim();
+  if (!BINDING_NAME_RE.test(name)) {
+    throw new Error(`bindings[${index}].name is invalid; use 1-32 chars of a-z, 0-9, _ or -`);
+  }
+  const stateFile = String(raw?.state_file || "").trim() || (name === "default" ? "state.json" : path.join("accounts", name, "state.json"));
+  return { name, state_file: stateFile, statePath: resolveStatePath(stateFile, name) };
+}
+
+function loadBindings() {
+  let raw = { bindings: [{ name: "default", state_file: "state.json" }] };
+  if (fs.existsSync(CONFIG_PATH)) {
+    raw = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+  }
+  if (!Array.isArray(raw.bindings) || raw.bindings.length === 0) {
+    throw new Error("bridge.config.json must contain at least one binding");
+  }
+  const bindings = raw.bindings.map((b, i) => normalizeBinding(b, i));
+  const seen = new Set();
+  for (const b of bindings) {
+    if (seen.has(b.name)) throw new Error(`duplicate binding name: ${b.name}`);
+    seen.add(b.name);
+  }
+  return bindings;
+}
+
+function findBinding(name, { create = false } = {}) {
+  const bindingName = String(name || "default").trim();
+  if (!BINDING_NAME_RE.test(bindingName)) {
+    throw new Error(`invalid binding name: ${bindingName}`);
+  }
+  const bindings = loadBindings();
+  let binding = bindings.find((b) => b.name === bindingName);
+  if (binding || !create) return binding;
+
+  binding = normalizeBinding({ name: bindingName });
+  bindings.push(binding);
+  const config = {
+    bindings: bindings.map(({ name: n, state_file }) => ({ name: n, state_file })),
+  };
+  fs.mkdirSync(path.dirname(binding.statePath), { recursive: true });
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
+  return binding;
+}
+
+function requireBinding(name) {
+  const binding = findBinding(name);
+  if (!binding) throw new Error(`unknown binding: ${name || "default"} (run: node bridge.mjs bindings)`);
+  return binding;
 }
 
 function log(...args) {
@@ -56,34 +135,51 @@ function log(...args) {
   } catch {}
 }
 
-function loadState() {
+function loadState(binding = null) {
+  const statePath = binding?.statePath || STATE_PATH;
   try {
-    return JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
+    return { ...emptyState(), ...JSON.parse(fs.readFileSync(statePath, "utf8")) };
   } catch {
-    return {
-      bot_token: "",
-      baseurl: DEFAULT_BASE,
-      ilink_bot_id: "",
-      owner_user_id: "",
-      get_updates_buf: "",
-      last_context_token: "",
-      last_context_at: 0,
-      seen_ids: [],
-      auth_status: "not_logged_in",
-    };
+    return emptyState();
   }
 }
 
-function saveState(s) {
-  fs.writeFileSync(STATE_PATH, JSON.stringify(s, null, 2), { mode: 0o600 });
-  fs.chmodSync(STATE_PATH, 0o600);
+function saveState(s, binding = null) {
+  const statePath = binding?.statePath || STATE_PATH;
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify(s, null, 2), { mode: 0o600 });
+  fs.chmodSync(statePath, 0o600);
+}
+
+function writeBindingStatus(binding, patch) {
+  const bindingName = typeof binding === "string" ? binding : binding?.name || "default";
+  let root = {};
+  try { root = JSON.parse(fs.readFileSync(STATUS_PATH, "utf8")); } catch {}
+  const previous = root.bindings?.[bindingName] || {};
+  const next = {
+    ...previous,
+    ...patch,
+    binding: bindingName,
+    updated_at: new Date().toISOString(),
+    pid: process.pid,
+  };
+  if (patch.auth_status === "ok") delete next.last_error;
+  root.bindings = { ...(root.bindings || {}), [bindingName]: next };
+  if (bindingName === "default") {
+    // Preserve the pre-multi-binding root status fields for existing tooling.
+    for (const [k, v] of Object.entries(next)) {
+      if (k !== "bindings") root[k] = v;
+    }
+    if (patch.auth_status === "ok") delete root.last_error;
+  }
+  root.updated_at = next.updated_at;
+  root.pid = process.pid;
+  fs.writeFileSync(STATUS_PATH, JSON.stringify(root, null, 2));
+  fs.writeFileSync(path.join(STATUSES_DIR, `${bindingName}.json`), JSON.stringify(next, null, 2));
 }
 
 function writeStatus(patch) {
-  let cur = {};
-  try { cur = JSON.parse(fs.readFileSync(STATUS_PATH, "utf8")); } catch {}
-  const next = { ...cur, ...patch, updated_at: new Date().toISOString(), pid: process.pid };
-  fs.writeFileSync(STATUS_PATH, JSON.stringify(next, null, 2));
+  writeBindingStatus("default", patch);
 }
 
 function appHeaders() {
@@ -126,79 +222,103 @@ async function postJson(base, p, body, headers, timeoutMs = 50000) {
 
 // ---------- QR login ----------
 
-async function login() {
-  const state = loadState();
-  const localTokens = state.bot_token ? [state.bot_token] : [];
-  log("Requesting QR code ...");
-  const qrRes = await postJson(
-    DEFAULT_BASE,
-    "/ilink/bot/get_bot_qrcode?bot_type=3",
-    { local_token_list: localTokens },
-    jsonHeaders(false, state),
-    30000
-  );
-  if (!qrRes.json?.qrcode) {
-    log("Failed to get QR code:", qrRes.raw.slice(0, 300));
-    process.exitCode = 1;
-    return;
-  }
-  const { qrcode, qrcode_img_content } = qrRes.json;
-  fs.writeFileSync(
-    path.join(LOGIN_DIR, "qr.json"),
-    JSON.stringify(
-      { qrcode, qrcode_img_content, created_at: new Date().toISOString() },
-      null,
-      2
-    )
-  );
-  log("QR code ready in login/qr.json — waiting for scan ...");
+function loginDirFor(binding) {
+  const dir = binding.name === "default" ? LOGIN_DIR : path.join(LOGIN_DIR, binding.name);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
-  let pollBase = DEFAULT_BASE;
-  const deadline = Date.now() + 5 * 60 * 1000;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 2000));
-    let url = `${pollBase}/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`;
-    const verifyPath = path.join(LOGIN_DIR, "verify.txt");
-    if (fs.existsSync(verifyPath)) {
-      const code = fs.readFileSync(verifyPath, "utf8").trim();
-      if (code) url += `&verify_code=${encodeURIComponent(code)}`;
-    }
-    let st = null;
-    try {
-      const res = await fetch(url, { headers: appHeaders() });
-      st = await res.json();
-    } catch {
-      continue; // treat network failure as "wait"
-    }
-    const safeStatus = { ...st, bot_token: st.bot_token ? "<redacted>" : undefined };
-    fs.writeFileSync(path.join(LOGIN_DIR, "status.json"), JSON.stringify(safeStatus, null, 2));
-    if (st.status === "confirmed") {
-      const s = loadState();
-      s.bot_token = st.bot_token || "";
-      s.baseurl = st.baseurl || DEFAULT_BASE;
-      s.ilink_bot_id = st.ilink_bot_id || "";
-      s.owner_user_id = st.ilink_user_id || "";
-      s.get_updates_buf = "";
-      s.seen_ids = [];
-      s.auth_status = "ok";
-      saveState(s);
-      log(`Login confirmed. Owner bound: ${s.owner_user_id || "(unknown)"}`);
+async function login(binding) {
+  const loginDir = loginDirFor(binding);
+  const state = loadState(binding);
+  const localTokens = state.bot_token ? [state.bot_token] : [];
+  const maxQrAttempts = 3;
+
+  for (let attempt = 1; attempt <= maxQrAttempts; attempt++) {
+    log(`Requesting QR code for binding "${binding.name}" (attempt ${attempt}/${maxQrAttempts}) ...`);
+    const qrRes = await postJson(
+      DEFAULT_BASE,
+      "/ilink/bot/get_bot_qrcode?bot_type=3",
+      { local_token_list: localTokens },
+      jsonHeaders(false, state),
+      30000
+    );
+    if (!qrRes.json?.qrcode) {
+      log("Failed to get QR code:", qrRes.raw.slice(0, 300));
+      process.exitCode = 1;
       return;
     }
-    if (st.status === "scaned_but_redirect" && st.redirect_host) {
-      pollBase = st.redirect_host.startsWith("http") ? st.redirect_host : `https://${st.redirect_host}`;
-      log("Redirected QR polling to", pollBase);
+    const { qrcode, qrcode_img_content } = qrRes.json;
+    fs.writeFileSync(
+      path.join(loginDir, "qr.json"),
+      JSON.stringify(
+        { binding: binding.name, qrcode, qrcode_img_content, attempt, created_at: new Date().toISOString() },
+        null,
+        2
+      )
+    );
+    log(`QR code ready in ${path.relative(DIR, loginDir)}/qr.json — waiting for scan ...`);
+
+    let pollBase = DEFAULT_BASE;
+    let refresh = false;
+    const deadline = Date.now() + 5 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2000));
+      let url = `${pollBase}/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`;
+      const verifyPath = path.join(loginDir, "verify.txt");
+      if (fs.existsSync(verifyPath)) {
+        const code = fs.readFileSync(verifyPath, "utf8").trim();
+        if (code) url += `&verify_code=${encodeURIComponent(code)}`;
+      }
+      let st = null;
+      try {
+        const res = await fetch(url, { headers: appHeaders() });
+        st = await res.json();
+      } catch {
+        continue; // treat network failure as "wait"
+      }
+      const safeStatus = { ...st, bot_token: st.bot_token ? "<redacted>" : undefined };
+      fs.writeFileSync(path.join(loginDir, "status.json"), JSON.stringify(safeStatus, null, 2));
+      if (st.status === "confirmed") {
+        const s = loadState(binding);
+        s.bot_token = st.bot_token || "";
+        s.baseurl = st.baseurl || DEFAULT_BASE;
+        s.ilink_bot_id = st.ilink_bot_id || "";
+        s.owner_user_id = st.ilink_user_id || "";
+        s.get_updates_buf = "";
+        s.seen_ids = [];
+        s.auth_status = "ok";
+        saveState(s, binding);
+        writeBindingStatus(binding, { auth_status: "ok" });
+        log(`Login confirmed for binding "${binding.name}". Owner bound: ${s.owner_user_id || "(unknown)"}`);
+        return;
+      }
+      if (st.status === "scaned_but_redirect" && st.redirect_host) {
+        pollBase = st.redirect_host.startsWith("http") ? st.redirect_host : `https://${st.redirect_host}`;
+        log("Redirected QR polling to", pollBase);
+      }
+      if (st.status === "expired") {
+        if (attempt < maxQrAttempts) {
+          log("QR code expired; refreshing automatically ...");
+          refresh = true;
+          break;
+        }
+        log("QR flow ended with status: expired");
+        process.exitCode = 2;
+        return;
+      }
+      if (st.status === "verify_code_blocked") {
+        log("QR flow ended with status:", st.status);
+        process.exitCode = 2;
+        return;
+      }
+      if (st.status === "need_verifycode") {
+        log(`Waiting for verify code (write it to ${path.relative(DIR, loginDir)}/verify.txt) ...`);
+      }
     }
-    if (st.status === "expired" || st.status === "verify_code_blocked") {
-      log("QR flow ended with status:", st.status);
-      process.exitCode = 2;
-      return;
-    }
-    if (st.status === "need_verifycode") {
-      log("Waiting for verify code (write it to login/verify.txt) ...");
-    }
+    if (!refresh) break;
   }
-  log("QR login timed out after 5 minutes.");
+  log("QR login timed out.");
   process.exitCode = 3;
 }
 
@@ -347,7 +467,7 @@ async function sendMedia(state, toUserId, contextToken, filePath) {
   await postSendMessage(state, toUserId, contextToken, [item]);
 }
 
-async function downloadInboundMedia(msgId, idx, item) {
+async function downloadInboundMedia(bindingName, msgId, idx, item) {
   const bodies = { 2: item.image_item, 4: item.file_item, 5: item.video_item };
   const body = bodies[item.type];
   if (!body?.media?.encrypt_query_param && !body?.media?.full_url) return null;
@@ -372,7 +492,7 @@ async function downloadInboundMedia(msgId, idx, item) {
   let name = body.file_name ? path.basename(body.file_name) : "";
   if (!name) name = `${msgId}-${idx}.${kind === "image" ? "jpg" : kind === "video" ? "mp4" : "bin"}`;
   const safe = name.replace(/[^\w.\- ]/g, "_");
-  const outPath = path.join(MEDIA_IN, `${msgId}-${idx}-${safe}`);
+  const outPath = path.join(MEDIA_IN, `${bindingName}-${msgId}-${idx}-${safe}`);
   fs.writeFileSync(outPath, data);
   return { kind, path: outPath, file_name: safe, size: data.length };
 }
@@ -388,27 +508,49 @@ function extractText(msg) {
   return parts.join("\n").trim();
 }
 
-function raiseAlert(kind, detail) {
-  const name = `${kind}-${Date.now()}.json`;
+function raiseAlert(kind, detail, bindingName = "default") {
+  const name = `${kind}-${bindingName}-${Date.now()}.json`;
   fs.writeFileSync(
     path.join(ALERTS, name),
-    JSON.stringify({ kind, detail, at: new Date().toISOString() }, null, 2)
+    JSON.stringify({ kind, binding: bindingName, detail, at: new Date().toISOString() }, null, 2)
   );
-  log("ALERT:", kind, detail || "");
+  log("ALERT:", kind, `binding=${bindingName}`, detail || "");
 }
 
-async function flushOutbox(state) {
+async function flushOutbox() {
+  const bindings = new Map(loadBindings().map((b) => [b.name, b]));
   const files = fs.readdirSync(OUTBOX).filter((f) => f.endsWith(".json")).sort();
   for (const f of files) {
     const p = path.join(OUTBOX, f);
     let job;
-    try { job = JSON.parse(fs.readFileSync(p, "utf8")); } catch { fs.renameSync(p, path.join(FAILED, f)); continue; }
+    try {
+      job = JSON.parse(fs.readFileSync(p, "utf8"));
+    } catch {
+      // The agent may still be writing the file; only quarantine old parse failures.
+      try {
+        if (Date.now() - fs.statSync(p).mtimeMs > 10000) fs.renameSync(p, path.join(FAILED, f));
+      } catch {}
+      continue;
+    }
+    if (job._next_attempt_at && Number(job._next_attempt_at) > Date.now()) continue;
+
+    const bindingName = String(job.binding || job.account || "default");
+    const binding = bindings.get(bindingName);
+    if (!binding) {
+      log("Send failed:", f, `unknown binding ${bindingName}`);
+      fs.renameSync(p, path.join(FAILED, f));
+      continue;
+    }
+    const state = loadState(binding);
     const to = job.to_user_id || state.owner_user_id;
     const token = job.context_token || state.last_context_token;
     try {
+      if (!state.bot_token || state.auth_status === "expired") {
+        throw new Error(`binding ${bindingName} is not ready (auth_status=${state.auth_status || "unknown"})`);
+      }
       if (job.text) await sendText(state, to, token, job.text);
       for (const att of job.attachments || []) {
-        if (typeof att !== "string" || !att.startsWith("/home/hatch/") || !fs.existsSync(att)) {
+        if (typeof att !== "string" || !path.isAbsolute(att) || !fs.existsSync(att)) {
           log("Skipped invalid attachment:", String(att));
           continue;
         }
@@ -416,40 +558,67 @@ async function flushOutbox(state) {
         log(`Sent attachment ${att}`);
       }
       fs.renameSync(p, path.join(SENT, f));
-      log(`Sent reply ${f} (${(job.text || "").length} chars)`);
+      log(`Sent reply ${f} via binding=${bindingName} (${(job.text || "").length} chars)`);
     } catch (e) {
-      log("Send failed:", f, String(e.message || e));
-      if (String(e.message || "").includes("ret=-14")) {
+      const message = String(e.message || e);
+      log("Send failed:", f, `binding=${bindingName}`, message);
+      if (message.includes("ret=-14")) {
         state.auth_status = "expired";
-        saveState(state);
-        raiseAlert("auth-expired", "sendmessage returned -14");
+        saveState(state, binding);
+        writeBindingStatus(binding, { auth_status: "expired", last_error: message });
+        raiseAlert("auth-expired", "sendmessage returned -14", bindingName);
+        fs.renameSync(p, path.join(FAILED, f));
+        continue;
       }
-      fs.renameSync(p, path.join(FAILED, f));
+      const attempts = Number(job._attempts || 0) + 1;
+      job._attempts = attempts;
+      job._last_error = message;
+      if (attempts < 3) {
+        job._next_attempt_at = Date.now() + attempts * 5000;
+        try { fs.writeFileSync(p, JSON.stringify(job, null, 2)); } catch {}
+        log(`Will retry reply ${f} (attempt ${attempts}/3)`);
+      } else {
+        delete job._next_attempt_at;
+        try { fs.writeFileSync(p, JSON.stringify(job, null, 2)); } catch {}
+        fs.renameSync(p, path.join(FAILED, f));
+      }
     }
   }
 }
 
-async function run() {
-  log("Bridge daemon starting ...");
-  writeStatus({ auth_status: loadState().auth_status, mode: "run" });
+async function runOutboxLoop() {
+  for (;;) {
+    try {
+      await flushOutbox();
+    } catch (e) {
+      log("Outbox loop error:", String(e.message || e));
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
+async function runAccount(binding) {
+  log(`Poller starting for binding "${binding.name}" ...`);
   let backoff = 2000;
   for (;;) {
-    const state = loadState();
+    const state = loadState(binding);
     if (!state.bot_token) {
-      writeStatus({ auth_status: "not_logged_in" });
+      writeBindingStatus(binding, { auth_status: "not_logged_in", mode: "run" });
       await new Promise((r) => setTimeout(r, 5000));
       continue;
     }
     if (state.auth_status === "expired") {
-      writeStatus({ auth_status: "expired" });
-      // Idle until credentials change (a fresh login rewrites state.json).
-      const before = fs.statSync(STATE_PATH).mtimeMs;
+      writeBindingStatus(binding, { auth_status: "expired", mode: "run" });
+      // Idle until this binding's credentials change (a fresh login rewrites its state file).
+      let before = 0;
+      try { before = fs.statSync(binding.statePath).mtimeMs; } catch {}
       await new Promise((r) => setTimeout(r, 5000));
-      if (fs.statSync(STATE_PATH).mtimeMs !== before) log("Credentials changed, resuming.");
+      let after = 0;
+      try { after = fs.statSync(binding.statePath).mtimeMs; } catch {}
+      if (after !== before) log(`Credentials changed for binding "${binding.name}", resuming.`);
       continue;
     }
     try {
-      await flushOutbox(state);
       const timeoutGuess = 45000;
       const res = await postJson(
         state.baseurl || DEFAULT_BASE,
@@ -462,9 +631,9 @@ async function run() {
       const code = typeof j.errcode === "number" ? j.errcode : j.ret;
       if (code === -14) {
         state.auth_status = "expired";
-        saveState(state);
-        raiseAlert("auth-expired", "getupdates returned -14 (session expired, re-scan needed)");
-        writeStatus({ auth_status: "expired" });
+        saveState(state, binding);
+        raiseAlert("auth-expired", "getupdates returned -14 (session expired, re-scan needed)", binding.name);
+        writeBindingStatus(binding, { auth_status: "expired", mode: "run" });
         continue;
       }
       if (typeof j.ret === "number" && j.ret !== 0) throw new Error(`getupdates ret=${j.ret} ${j.errmsg || ""}`);
@@ -480,7 +649,7 @@ async function run() {
         if (msg.message_type !== 1) continue; // only user messages
         if (msg.group_id) continue; // direct chats only
         if (state.owner_user_id && msg.from_user_id !== state.owner_user_id) {
-          log(`Ignored message from non-owner ${msg.from_user_id}`);
+          log(`Ignored message from non-owner on binding=${binding.name} ${msg.from_user_id}`);
           continue;
         }
         const text = extractText(msg);
@@ -493,7 +662,7 @@ async function run() {
         for (let i = 0; i < items.length; i++) {
           if ([2, 4, 5].includes(items[i].type)) {
             try {
-              const mf = await downloadInboundMedia(id, i, items[i]);
+              const mf = await downloadInboundMedia(binding.name, id, i, items[i]);
               if (mf) {
                 mediaFiles.push(mf);
                 log(`Downloaded inbound media: ${mf.kind} ${mf.file_name} (${mf.size} bytes)`);
@@ -505,6 +674,7 @@ async function run() {
         }
         const record = {
           id,
+          binding: binding.name,
           from_user_id: msg.from_user_id,
           text,
           has_media: items.some((i) => [2, 4, 5].includes(i.type)),
@@ -514,51 +684,86 @@ async function run() {
           create_time_ms: msg.create_time_ms || null,
           received_at: new Date().toISOString(),
         };
-        const fname = `${Date.now()}-${id.replace(/[^\w-]/g, "")}.json`;
+        const fname = `${Date.now()}-${binding.name}-${id.replace(/[^\w-]/g, "")}.json`;
         fs.writeFileSync(path.join(INBOX, fname), JSON.stringify(record, null, 2));
-        log(`Inbox: message ${id} from owner (${text.length} chars)`);
+        log(`Inbox: message ${id} on binding=${binding.name} from owner (${text.length} chars)`);
       }
       state.seen_ids = [...seen].slice(-300);
-      saveState(state);
-      writeStatus({ auth_status: "ok", last_poll_at: new Date().toISOString() });
+      saveState(state, binding);
+      writeBindingStatus(binding, { auth_status: "ok", mode: "run", last_poll_at: new Date().toISOString() });
     } catch (e) {
       if (e.name === "AbortError") continue; // long-poll timeout: repoll immediately
-      log("Poll error:", String(e.message || e), `backing off ${backoff}ms`);
-      writeStatus({ auth_status: state.auth_status, last_error: String(e.message || e) });
+      log(`Poll error on binding=${binding.name}:`, String(e.message || e), `backing off ${backoff}ms`);
+      writeBindingStatus(binding, { auth_status: state.auth_status, mode: "run", last_error: String(e.message || e) });
       await new Promise((r) => setTimeout(r, backoff));
       backoff = Math.min(backoff * 2, 30000);
     }
   }
 }
 
+async function run() {
+  const bindings = loadBindings();
+  log(`Bridge daemon starting with ${bindings.length} binding(s): ${bindings.map((b) => b.name).join(", ")}`);
+  for (const binding of bindings) {
+    writeBindingStatus(binding, { auth_status: loadState(binding).auth_status, mode: "run" });
+  }
+  await Promise.all([runOutboxLoop(), ...bindings.map((binding) => runAccount(binding))]);
+}
+
 // ---------- Main ----------
 
 const cmd = process.argv[2] || "status";
 if (cmd === "login") {
-  await login();
+  const binding = findBinding(process.argv[3] || "default", { create: true });
+  await login(binding);
+} else if (cmd === "bindings") {
+  console.log(JSON.stringify(loadBindings().map(({ name, state_file }) => ({ name, state_file })), null, 2));
 } else if (cmd === "send-file") {
-  const s = loadState();
-  if (!s.bot_token) { console.error("not logged in"); process.exitCode = 1; }
+  const args = process.argv.slice(3);
+  let bindingName = "default";
+  if (args[0] === "--binding") {
+    bindingName = args[1] || "default";
+    args.splice(0, 2);
+  }
+  const binding = requireBinding(bindingName);
+  const s = loadState(binding);
+  if (!s.bot_token) { console.error(`not logged in for binding ${binding.name}`); process.exitCode = 1; }
+  else if (!args[0]) { console.error("usage: node bridge.mjs send-file [--binding <name>] <file>"); process.exitCode = 1; }
   else {
-    await sendMedia(s, s.owner_user_id, s.last_context_token, process.argv[3]);
-    console.log("sent", process.argv[3]);
+    await sendMedia(s, s.owner_user_id, s.last_context_token, args[0]);
+    console.log("sent", args[0], "via binding", binding.name);
   }
 } else if (cmd === "run") {
   await run();
 } else if (cmd === "status") {
-  const s = loadState();
+  const bindings = loadBindings().map((binding) => {
+    const s = loadState(binding);
+    let bindingStatus = {};
+    try { bindingStatus = JSON.parse(fs.readFileSync(path.join(STATUSES_DIR, `${binding.name}.json`), "utf8")); } catch {}
+    return {
+      name: binding.name,
+      logged_in: !!s.bot_token,
+      auth_status: s.auth_status,
+      owner_bound: !!s.owner_user_id,
+      baseurl: s.baseurl,
+      daemon: bindingStatus,
+    };
+  });
+  const defaultBinding = bindings.find((b) => b.name === "default") || bindings[0] || {};
   let st = {};
   try { st = JSON.parse(fs.readFileSync(STATUS_PATH, "utf8")); } catch {}
   console.log(JSON.stringify({
-    logged_in: !!s.bot_token,
-    auth_status: s.auth_status,
-    owner_bound: !!s.owner_user_id,
-    baseurl: s.baseurl,
+    logged_in: !!defaultBinding.logged_in,
+    auth_status: defaultBinding.auth_status || "not_logged_in",
+    owner_bound: !!defaultBinding.owner_bound,
+    baseurl: defaultBinding.baseurl || DEFAULT_BASE,
+    bindings,
     inbox_pending: fs.readdirSync(INBOX).length,
     outbox_pending: fs.readdirSync(OUTBOX).length,
     daemon: st,
   }, null, 2));
 } else {
   console.error("Unknown command:", cmd);
+  console.error("Commands: login [binding], bindings, run, status, send-file [--binding <name>] <file>");
   process.exitCode = 1;
 }

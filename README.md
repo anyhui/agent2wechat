@@ -8,7 +8,9 @@ Bridge an AI agent to WeChat via Tencent's official iLink Bot API (the ClawBot c
 
 - **收**：文字、语音（微信自带转文字）、图片、文件、视频；媒体自动从 CDN 下载并 AES 解密到本地。
 - **发**：纯文本（微信不渲染 Markdown），以及图片、视频、文件附件（加密上传 CDN 后发送）。
-- **只服务绑定者本人**：扫码绑定谁，就只接受谁的私聊消息，其余一律忽略。
+- **只服务绑定者本人**：每个 binding 扫码绑定谁，就只接受谁的私聊消息，其余一律忽略。
+- **多绑定**：一个守护进程可并行运行多个 binding；每个 binding 独立保存凭证、轮询游标、上下文和登录状态，一个 binding 过期不会停掉其他 binding。消息与回复都带 `binding` 字段并按它路由。
+- **发送可靠性**：outbox 由独立循环每 2 秒处理，普通发送失败最多重试 3 次（凭证过期 -14 不重试）；扫码二维码过期时自动刷新，最多 3 张。
 - **纯出站**：只发 HTTPS 出站请求，不开放任何端口，不接管微信号（读不到好友聊天，不能给好友/群发消息）。
 - **附带巡检脚本，需另行配置**：桥接程序本身不带自动巡检，也不会自愈。`examples/` 附带巡检脚本和 hook 模板，部署者另行配置定时 hook（参考实现为每 120 秒一次）后，服务被杀/机器重启后才可自动重装拉起。
 
@@ -18,9 +20,9 @@ Bridge an AI agent to WeChat via Tencent's official iLink Bot API (the ClawBot c
 微信 ClawBot 私聊
    │  iLink Bot API（ilinkai.weixin.qq.com）
    ▼
-bridge.mjs 守护进程（systemd 服务 agent2wechat）
-   │  getupdates 长轮询收消息 → inbox/（媒体解密后放 media-in/）
-   │  读取 outbox/ → sendmessage 发回（带原对话 context_token）
+bridge.mjs 守护进程（systemd 服务 agent2wechat，一个进程并行轮询全部 binding）
+   │  getupdates 长轮询收消息 → inbox/（消息带 binding，媒体解密后放 media-in/）
+   │  读取 outbox/ → 按 binding 选择凭证 → sendmessage 发回（带原对话 context_token）
    ▼
 文件队列  ←→  你的智能体（轮询 inbox/，把回复写进 outbox/）
 ```
@@ -34,6 +36,7 @@ bridge.mjs 守护进程（systemd 服务 agent2wechat）
 ```json
 {
   "id": "消息ID",
+  "binding": "default",
   "from_user_id": "绑定者ID",
   "text": "文字内容（语音为转写文本）",
   "has_media": true,
@@ -47,6 +50,7 @@ bridge.mjs 守护进程（systemd 服务 agent2wechat）
 
 ```json
 {
+  "binding": "入站消息的 binding，缺失时为 default",
   "to_user_id": "绑定者ID",
   "context_token": "入站消息的 context_token",
   "text": "纯文本回复，不要用 Markdown",
@@ -56,7 +60,7 @@ bridge.mjs 守护进程（systemd 服务 agent2wechat）
 
 `attachments` 可选，按扩展名判断图片/视频/文件。处理完的入站文件请移入 `processed/`，避免重复处理。
 
-会话连续性由智能体侧负责：桥接只转发消息，不保存对话上下文。推荐维护一份滚动记录 `chat-log.md`（「此前概要」+「近期对话」两部分）：处理每条消息前先读它，处理后把本轮往来追加进去；记录过长时把较早的部分概括折叠进概要，保持总量有界。绑定者发 `new` 时清空记录、开启新会话。具体指令写法见 `examples/hook-prompt-inbox.md`。
+会话连续性由智能体侧负责：桥接只转发消息，不保存对话上下文。推荐按 binding 维护滚动记录：默认 binding 用 `chat-log.md`，其他 binding 用 `chat-logs/<binding>.md`（结构均为「此前概要」+「近期对话」两部分），避免不同绑定串话。处理每条消息前先读对应记录，处理后把本轮往来追加进去；记录过长时把较早的部分概括折叠进概要，保持总量有界。绑定者发 `new` 时只清空自己 binding 的记录。具体指令写法见 `examples/hook-prompt-inbox.md`。
 
 ## 安装与运行
 
@@ -66,26 +70,38 @@ bridge.mjs 守护进程（systemd 服务 agent2wechat）
 # 1. 安装并启动服务（会把当前 shell 的代理变量写进服务单元并持久化到 proxy-env.sh）
 bash install-service.sh
 
-# 2. 扫码绑定（先停服务，生成二维码，用微信扫；二维码约 5 分钟有效）
+# 2. 扫码绑定（先停服务，生成二维码，用微信扫；二维码过期会自动刷新，最多 3 张）
 systemctl stop agent2wechat
-node bridge.mjs login          # 二维码在 login/qr.png；出现验证码时写 login/verify.txt
+node bridge.mjs login          # 默认 binding；二维码信息在 login/qr.json，验证码写 login/verify.txt
 systemctl start agent2wechat
 
 # 3. 查看状态
-node bridge.mjs status         # logged_in / auth_status / 队列积压 / 最近轮询时间
+node bridge.mjs status         # 全部 binding 的 logged_in / auth_status / 队列积压 / 最近轮询时间
+node bridge.mjs bindings       # 列出已登记的 binding
 ```
 
-手动给绑定者发一个文件（调试）：`node bridge.mjs send-file <路径>`。
+新增 binding（名称仅限小写字母、数字、下划线、连字符，最长 32 个字符）：
+
+```bash
+systemctl stop agent2wechat
+node bridge.mjs login work     # 自动登记 work；凭证写 accounts/work/state.json，二维码在 login/work/qr.json
+systemctl start agent2wechat
+```
+
+手动给绑定者发一个文件（调试）：`node bridge.mjs send-file [--binding <名称>] <路径>`。
 
 ## 目录
 
 | 路径 | 说明 |
 | --- | --- |
-| `bridge.mjs` | 守护进程 + 命令行工具（login / run / status / send-file） |
+| `bridge.mjs` | 守护进程 + 命令行工具（login [binding] / bindings / run / status / send-file） |
 | `install-service.sh` | 生成 systemd 单元并安装 |
-| `state.json`（600，勿提交） | 登录凭证、绑定关系、轮询游标——**绝密，不外传** |
+| `bridge.config.json`（勿提交） | 非密钥配置：binding 名称与 state 文件路径；格式见 `bridge.config.example.json` |
+| `state.json`（600，勿提交） | 默认 binding 的登录凭证、绑定关系、轮询游标——**绝密，不外传** |
+| `accounts/<binding>/state.json`（600，勿提交） | 附加 binding 各自的登录凭证、绑定关系、轮询游标 |
+| `statuses/<binding>.json` | 每个 binding 的运行状态；根 `status.json` 汇总全部 binding |
 | `proxy-env.sh`（600，勿提交） | 出站代理变量，供无人值守重装复用 |
-| `chat-log.md`（勿提交） | 智能体侧维护的滚动会话记录（概要 + 近期对话），让连续聊天不断片 |
+| `chat-log.md` / `chat-logs/<binding>.md`（勿提交） | 智能体侧按 binding 维护的滚动会话记录（概要 + 近期对话），让连续聊天不断片且不串话 |
 | `inbox/ processed/ outbox/ sent/ failed/` | 消息与回复队列 |
 | `media-in/` | 入站媒体解密后的文件 |
 | `alerts/` | 凭证过期等告警 |
@@ -98,13 +114,13 @@ node bridge.mjs status         # logged_in / auth_status / 队列积压 / 最近
 | --- | --- | --- |
 | 微信显示「暂时无法连接」 | 服务不在（机器重启/被杀） | `bash install-service.sh` 重装；如已另行配置巡检 hook，也可等它自动恢复 |
 | getupdates 一直 `fetch failed` | 服务单元缺出站代理变量 | 重跑 `install-service.sh`（从 `proxy-env.sh` 复用） |
-| 返回 -14 / auth expired | 登录凭证过期 | 停服务 → `node bridge.mjs login` 重新扫码 → 启服务 |
-| 二维码过期 | 超过约 5 分钟未扫 | 重新生成 |
+| 返回 -14 / auth expired | 某个 binding 的登录凭证过期 | 停服务 → `node bridge.mjs login <binding>` 只重登该 binding → 启服务；其他 binding 不受影响 |
+| 二维码过期 | 一张二维码超时 | 登录程序自动刷新，最多 3 张；仍未扫再重新运行登录命令 |
 
 ## 安全说明
 
-- bot token 只存 `state.json`（权限 600），不要提交到仓库、不要贴到聊天或日志里。
-- 只响应扫码绑定者一人的私聊；这是官方 ClawBot 直聊通道，不是微信号托管。
+- bot token 只存各 binding 的 `state.json`（权限 600），不要提交到仓库、不要贴到聊天或日志里；非密钥配置单独放 `bridge.config.json`。
+- 每个 binding 只响应其扫码绑定者的私聊，不同 binding 相互隔离；这是官方 ClawBot 直聊通道，不是微信号托管。
 - 若运行环境会周期性重置（如云端沙箱），把项目目录放在持久化存储上，并按 `examples/` 另行配置巡检 hook；只装桥接本身不会自动恢复。
 
 ## License

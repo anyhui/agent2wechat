@@ -23,7 +23,7 @@ scan_dir() {
     last=$(awk -v k="$kind/$base" '$1==k {print $2}' "$STATE_FILE" | tail -1)
     if [ -z "$last" ] || [ $((now - last)) -ge 600 ]; then
       local content
-      content=$(jq -c '{id, from_user_id, text: (.text // "" | .[0:2000]), has_media: (.has_media // false), context_token: (.context_token // ""), kind: (.kind // "")}' "$f" 2>/dev/null || echo '{}')
+      content=$(jq -c '{id, binding: (.binding // "default"), from_user_id, text: (.text // "" | .[0:2000]), has_media: (.has_media // false), context_token: (.context_token // ""), kind: (.kind // "")}' "$f" 2>/dev/null || echo '{}')
       wake_items=$(jq -c --arg kind "$kind" --arg file "$base" --argjson item "$content" '. + [{kind: $kind, file: $file, message: $item}]' <<<"$wake_items")
       echo "$kind/$base $now" >> "$tmp_state"
       changed=1

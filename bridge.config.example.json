@@ -1,0 +1,12 @@
+{
+  "bindings": [
+    {
+      "name": "default",
+      "state_file": "state.json"
+    },
+    {
+      "name": "work",
+      "state_file": "accounts/work/state.json"
+    }
+  ]
+}
