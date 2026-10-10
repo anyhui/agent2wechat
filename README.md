@@ -56,6 +56,8 @@ bridge.mjs 守护进程（systemd 服务 agent2wechat）
 
 `attachments` 可选，按扩展名判断图片/视频/文件。处理完的入站文件请移入 `processed/`，避免重复处理。
 
+会话连续性由智能体侧负责：桥接只转发消息，不保存对话上下文。推荐维护一份滚动记录 `chat-log.md`（「此前概要」+「近期对话」两部分）：处理每条消息前先读它，处理后把本轮往来追加进去；记录过长时把较早的部分概括折叠进概要，保持总量有界。绑定者发 `new` 时清空记录、开启新会话。具体指令写法见 `examples/hook-prompt-inbox.md`。
+
 ## 安装与运行
 
 环境：Linux + systemd、Node.js 18+（用到全局 fetch 与 `NODE_USE_ENV_PROXY`）、网络能出站访问 `*.weixin.qq.com`。
@@ -83,6 +85,7 @@ node bridge.mjs status         # logged_in / auth_status / 队列积压 / 最近
 | `install-service.sh` | 生成 systemd 单元并安装 |
 | `state.json`（600，勿提交） | 登录凭证、绑定关系、轮询游标——**绝密，不外传** |
 | `proxy-env.sh`（600，勿提交） | 出站代理变量，供无人值守重装复用 |
+| `chat-log.md`（勿提交） | 智能体侧维护的滚动会话记录（概要 + 近期对话），让连续聊天不断片 |
 | `inbox/ processed/ outbox/ sent/ failed/` | 消息与回复队列 |
 | `media-in/` | 入站媒体解密后的文件 |
 | `alerts/` | 凭证过期等告警 |

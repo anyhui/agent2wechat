@@ -6,6 +6,7 @@ node_modules/
 
 # Credentials and runtime state
 state.json
+chat-log.md
 status.json
 proxy-env.sh
 *.service
