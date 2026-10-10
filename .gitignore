@@ -1,0 +1,33 @@
+# Dependencies and local configuration
+node_modules/
+.env
+.env.*
+!.env.example
+
+# Credentials and runtime state
+state.json
+status.json
+proxy-env.sh
+*.service
+
+# Private messages, media, login data and logs
+/media-in/*
+!/media-in/.gitkeep
+/logs/*
+!/logs/.gitkeep
+/login/*
+!/login/.gitkeep
+/alerts/*
+!/alerts/.gitkeep
+/failed/*
+!/failed/.gitkeep
+/sent/*
+!/sent/.gitkeep
+/processed/*
+!/processed/.gitkeep
+/outbox/*
+!/outbox/.gitkeep
+/inbox/*
+!/inbox/.gitkeep
+
+.DS_Store
