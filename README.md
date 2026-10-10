@@ -10,7 +10,7 @@ Bridge an AI agent to WeChat via Tencent's official iLink Bot API (the ClawBot c
 - **发**：纯文本（微信不渲染 Markdown），以及图片、视频、文件附件（加密上传 CDN 后发送）。
 - **只服务绑定者本人**：扫码绑定谁，就只接受谁的私聊消息，其余一律忽略。
 - **纯出站**：只发 HTTPS 出站请求，不开放任何端口，不接管微信号（读不到好友聊天，不能给好友/群发消息）。
-- **可自愈**：配合巡检脚本，服务被杀/机器重启后可自动重装拉起（见 `examples/`）。
+- **附带巡检脚本，需另行配置**：桥接程序本身不带自动巡检，也不会自愈。`examples/` 附带巡检脚本和 hook 模板，部署者另行配置定时 hook（参考实现为每 120 秒一次）后，服务被杀/机器重启后才可自动重装拉起。
 
 ## 架构
 
@@ -87,13 +87,13 @@ node bridge.mjs status         # logged_in / auth_status / 队列积压 / 最近
 | `media-in/` | 入站媒体解密后的文件 |
 | `alerts/` | 凭证过期等告警 |
 | `logs/bridge.log` | 守护进程日志 |
-| `examples/` | 与 Muse hooks 的参考对接（消息处理 + 服务巡检自愈） |
+| `examples/` | 与 Muse hooks 的参考对接（消息处理 + 服务巡检脚本与 hook 模板，需另行配置，不是桥接内置功能） |
 
 ## 故障排查
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| 微信显示「暂时无法连接」 | 服务不在（机器重启/被杀） | `bash install-service.sh` 重装，或配巡检自动恢复 |
+| 微信显示「暂时无法连接」 | 服务不在（机器重启/被杀） | `bash install-service.sh` 重装；如已另行配置巡检 hook，也可等它自动恢复 |
 | getupdates 一直 `fetch failed` | 服务单元缺出站代理变量 | 重跑 `install-service.sh`（从 `proxy-env.sh` 复用） |
 | 返回 -14 / auth expired | 登录凭证过期 | 停服务 → `node bridge.mjs login` 重新扫码 → 启服务 |
 | 二维码过期 | 超过约 5 分钟未扫 | 重新生成 |
@@ -102,7 +102,7 @@ node bridge.mjs status         # logged_in / auth_status / 队列积压 / 最近
 
 - bot token 只存 `state.json`（权限 600），不要提交到仓库、不要贴到聊天或日志里。
 - 只响应扫码绑定者一人的私聊；这是官方 ClawBot 直聊通道，不是微信号托管。
-- 若运行环境会周期性重置（如云端沙箱），把项目目录放在持久化存储上，并配合 `examples/` 的巡检脚本实现自愈。
+- 若运行环境会周期性重置（如云端沙箱），把项目目录放在持久化存储上，并按 `examples/` 另行配置巡检 hook；只装桥接本身不会自动恢复。
 
 ## License
 
