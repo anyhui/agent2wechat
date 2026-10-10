@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Installs the muse2wechat systemd unit.
+# Installs the agent2wechat systemd unit.
 # The unit needs this VM's egress-proxy environment for Node fetch to reach
 # ilinkai.weixin.qq.com, so the proxy vars are copied from the *current*
 # shell environment at install time instead of being stored in the repo.
 set -euo pipefail
 
-UNIT=/etc/systemd/system/muse2wechat.service
+UNIT=/etc/systemd/system/agent2wechat.service
 WORKDIR="$(cd "$(dirname "$0")" && pwd)"
 ENVFILE="$WORKDIR/proxy-env.sh"
 
@@ -18,7 +18,7 @@ fi
 
 {
   echo "[Unit]"
-  echo "Description=muse2wechat bridge (iLink)"
+  echo "Description=agent2wechat bridge (iLink)"
   echo "After=network-online.target"
   echo "Wants=network-online.target"
   echo ""
@@ -51,6 +51,6 @@ chmod 600 "$UNIT"
 chmod 600 "$ENVFILE"
 
 systemctl daemon-reload
-systemctl enable --now muse2wechat.service
-systemctl restart muse2wechat.service
-echo "muse2wechat installed and (re)started."
+systemctl enable --now agent2wechat.service
+systemctl restart agent2wechat.service
+echo "agent2wechat installed and (re)started."

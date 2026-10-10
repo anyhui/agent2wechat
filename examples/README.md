@@ -9,10 +9,10 @@
 | hook | 脚本 | 轮询间隔 | 指令模板 | 作用 |
 | --- | --- | --- | --- | --- |
 | 消息处理 | `wechat-inbox.sh` | 15 秒 | `hook-prompt-inbox.md` | 轮询 inbox/ 与 alerts/，有新消息就唤醒智能体处理并回写 outbox/ |
-| 服务巡检 | `muse2wechat-watchdog.sh` | 120 秒 | `hook-prompt-watchdog.md` | 轮询 systemd 服务状态，发现丢失就重跑 install-service.sh 拉起并唤醒上报 |
+| 服务巡检 | `agent2wechat-watchdog.sh` | 120 秒 | `hook-prompt-watchdog.md` | 轮询 systemd 服务状态，发现丢失就重跑 install-service.sh 拉起并唤醒上报 |
 
 ## 约定
 
-- 队列根目录可用环境变量 `WECHAT_BRIDGE_HOME` 覆盖，默认 `$HOME/workspace/muse2wechat`。
+- 队列根目录可用环境变量 `WECHAT_BRIDGE_HOME` 覆盖，默认 `$HOME/workspace/agent2wechat`。
 - 指令模板里的 `<BRIDGE_HOME>` 要替换成本项目目录的实际路径；带方括号的说明是给部署者看的，改完删掉。
 - 回复纪律（纯文本、不带 Markdown）、outbox 写法、过期告警上报，都写在指令模板里，部署时按模板原文使用即可；只有「执行摘要写多细」这类偏好项需要部署者自己定。

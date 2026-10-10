@@ -2,7 +2,7 @@
 set -euo pipefail
 source "$HATCH_HOOK_RUNTIME"
 
-BRIDGE="${WECHAT_BRIDGE_HOME:-$HOME/workspace/muse2wechat}"
+BRIDGE="${WECHAT_BRIDGE_HOME:-$HOME/workspace/agent2wechat}"
 STATE_FILE="$HOME/hooks/state/wechat-inbox-announced.tsv"
 mkdir -p "$HOME/hooks/state"
 touch "$STATE_FILE"
@@ -54,8 +54,8 @@ fi
 
 count=$(jq 'length' <<<"$wake_items")
 if [ "$count" -gt 0 ]; then
-  log "muse2wechat wake" "$(jq -c '{count: length}' <<<"$wake_items")"
-  wake "muse2wechat_events" "$(jq -c '{items: .}' <<<"$wake_items")"
+  log "agent2wechat wake" "$(jq -c '{count: length}' <<<"$wake_items")"
+  wake "agent2wechat_events" "$(jq -c '{items: .}' <<<"$wake_items")"
 else
   silent "no new wechat bridge events" '{}'
 fi

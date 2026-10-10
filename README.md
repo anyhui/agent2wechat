@@ -1,4 +1,4 @@
-# muse2wechat
+# agent2wechat
 
 把 AI 智能体接到微信：通过腾讯官方 iLink Bot API（ClawBot 通道），智能体在微信私聊里收发文字、语音、图片、文件和视频。桥接本身不绑定任何智能体框架——它只维护一套文件队列，任何能读写文件的智能体都能接入。
 
@@ -18,7 +18,7 @@ Bridge an AI agent to WeChat via Tencent's official iLink Bot API (the ClawBot c
 微信 ClawBot 私聊
    │  iLink Bot API（ilinkai.weixin.qq.com）
    ▼
-bridge.mjs 守护进程（systemd 服务 muse2wechat）
+bridge.mjs 守护进程（systemd 服务 agent2wechat）
    │  getupdates 长轮询收消息 → inbox/（媒体解密后放 media-in/）
    │  读取 outbox/ → sendmessage 发回（带原对话 context_token）
    ▼
@@ -65,9 +65,9 @@ bridge.mjs 守护进程（systemd 服务 muse2wechat）
 bash install-service.sh
 
 # 2. 扫码绑定（先停服务，生成二维码，用微信扫；二维码约 5 分钟有效）
-systemctl stop muse2wechat
+systemctl stop agent2wechat
 node bridge.mjs login          # 二维码在 login/qr.png；出现验证码时写 login/verify.txt
-systemctl start muse2wechat
+systemctl start agent2wechat
 
 # 3. 查看状态
 node bridge.mjs status         # logged_in / auth_status / 队列积压 / 最近轮询时间

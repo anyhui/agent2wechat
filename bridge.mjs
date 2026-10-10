@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// muse2wechat — bridges an AI agent to WeChat via Tencent's official iLink Bot API
+// agent2wechat — bridges an AI agent to WeChat via Tencent's official iLink Bot API
 // (the same protocol the official openclaw-weixin plugin uses).
 //
 // Design:
@@ -36,7 +36,7 @@ const LOG_PATH = path.join(DIR, "logs", "bridge.log");
 const DEFAULT_BASE = "https://ilinkai.weixin.qq.com";
 const CDN_BASE = "https://novac2c.cdn.weixin.qq.com/c2c";
 const CHANNEL_VERSION = "2.4.8";
-const BOT_AGENT = "muse2wechat/1.0";
+const BOT_AGENT = "agent2wechat/1.0";
 const APP_CLIENT_VERSION = String((2 << 16) | (4 << 8) | 8); // 0x00MMNNPP for 2.4.8
 const UIN = Buffer.from(String(crypto.randomInt(0, 0xffffffff))).toString("base64");
 const TEXT_CHUNK = 3500;

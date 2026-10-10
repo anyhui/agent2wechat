@@ -1,5 +1,5 @@
 {
-  "name": "muse2wechat",
+  "name": "agent2wechat",
   "version": "1.0.0",
   "description": "WeChat bridge for AI agents via Tencent iLink Bot API",
   "type": "module",
